@@ -12,6 +12,7 @@ class BookChatBox extends StatefulWidget {
 class _BookChatBoxState extends State<BookChatBox> {
   final List<String> _messages = [];
   final TextEditingController _controller = TextEditingController();
+  bool _loading = false;
 
   @override
   void dispose() {
@@ -30,13 +31,13 @@ class _BookChatBoxState extends State<BookChatBox> {
     });
 
     if (input.toLowerCase().endsWith('.txt')) {
-      final content = await BookService.getBookContent(input);
-      final preview = content.length > 500 ? '${content.substring(0, 500)}...' : content;
-      if (!mounted) {
-        return;
-      }
+      setState(() => _loading = true);
+      final lines = await BookService.getBookLines(input);
+      if (!mounted) return;
+      final preview = lines.take(20).join('\n');
       setState(() {
-        _messages.add('App: $preview');
+        _loading = false;
+        _messages.add('App:\n$preview${lines.length > 20 ? '\n…(${lines.length} lines total)' : ''}');
       });
     }
 
@@ -55,6 +56,7 @@ class _BookChatBoxState extends State<BookChatBox> {
             ),
           ),
         ),
+        if (_loading) const LinearProgressIndicator(),
         Padding(
           padding: const EdgeInsets.all(8),
           child: Row(
@@ -79,3 +81,4 @@ class _BookChatBoxState extends State<BookChatBox> {
     );
   }
 }
+

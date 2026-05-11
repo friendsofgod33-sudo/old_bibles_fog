@@ -20,9 +20,13 @@ class SliderRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        SizedBox(
-          width: 90,
-          child: Text(label),
+        Flexible(
+          flex: 2,
+          child: Text(
+            label,
+            overflow: TextOverflow.ellipsis,
+            softWrap: false,
+          ),
         ),
         Expanded(
           child: Slider(

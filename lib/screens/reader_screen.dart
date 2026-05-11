@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../data/language_catalog.dart';
 import '../data/old_bibles_data.dart';
 import '../services/app_localizer.dart';
+import '../services/book_service.dart';
 import '../services/voice_reader.dart';
 import '../widgets/reader/slider_row.dart';
 import '../widgets/reader/translation_dropdown.dart';
@@ -28,6 +30,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   List<VoiceOption> _allVoices = const [];
   List<VoiceOption> _voices = const [];
   VoiceOption? _selectedVoice;
+  final Map<String, List<OldBibleVerse>> _assetVersesByTranslationId = {};
+  final Set<String> _availableTextAssetIds = {};
   StreamSubscription<bool>? _speakingSubscription;
   Map<AppText, String> _labels = AppLocalizer.fallbackStrings;
 
@@ -46,6 +50,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _selectedTranslation = OldBiblesData.translations.first;
     _selectedBook = _booksFor(_selectedTranslation).firstOrNull;
     _selectedChapter = _chaptersFor(_selectedTranslation, _selectedBook).firstOrNull;
+    _scanAvailableTextAssets();
+    _loadAssetTextForTranslation(_selectedTranslation);
 
     _speakingSubscription = _voiceReader.speakingState.listen((value) {
       if (!mounted) {
@@ -68,7 +74,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   List<String> _booksFor(OldBibleTranslation translation) {
-    return translation.verses.map((v) => v.book).toSet().toList()..sort();
+    return _effectiveVersesFor(translation).map((v) => v.book).toSet().toList()..sort();
   }
 
   List<int> _chaptersFor(OldBibleTranslation translation, String? book) {
@@ -76,7 +82,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return const [];
     }
 
-    return translation.verses
+    return _effectiveVersesFor(translation)
         .where((v) => v.book == book)
         .map((v) => v.chapter)
         .toSet()
@@ -89,10 +95,94 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return const [];
     }
 
-    return _selectedTranslation.verses
+    return _effectiveVersesFor(_selectedTranslation)
         .where((v) => v.book == _selectedBook && v.chapter == _selectedChapter)
         .toList()
       ..sort((a, b) => a.verse.compareTo(b.verse));
+  }
+
+  List<OldBibleVerse> _effectiveVersesFor(OldBibleTranslation translation) {
+    final fromAsset = _assetVersesByTranslationId[translation.id];
+    if (fromAsset != null) {
+      return fromAsset;
+    }
+    if (_isSampleOnly(translation.verses)) {
+      return const [];
+    }
+    return translation.verses;
+  }
+
+  bool _isSampleOnly(List<OldBibleVerse> verses) {
+    return verses.length == 2 && verses.every((v) => v.book == 'Sample');
+  }
+
+  bool _isTranslationSelectable(OldBibleTranslation translation) {
+    return true;
+  }
+
+  List<OldBibleTranslation> _selectableTranslations() {
+    return OldBiblesData.translations.where(_isTranslationSelectable).toList();
+  }
+
+  Future<void> _scanAvailableTextAssets() async {
+    try {
+      final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      final assetIds = manifest
+          .listAssets()
+          .where((p) => p.startsWith('assets/texts/') && p.toLowerCase().endsWith('.txt'))
+          .map((p) => p.split('/').last)
+          .map((f) => f.substring(0, f.length - 4))
+          .toSet();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _availableTextAssetIds
+          ..clear()
+          ..addAll(assetIds);
+      });
+      _loadAssetTextForTranslation(_selectedTranslation);
+    } catch (_) {
+      // Keep defaults if asset manifest probing fails.
+    }
+  }
+
+  Future<void> _loadAssetTextForTranslation(OldBibleTranslation translation) async {
+    if (!_availableTextAssetIds.contains(translation.id)) {
+      return;
+    }
+    if (_assetVersesByTranslationId.containsKey(translation.id)) {
+      return;
+    }
+
+    final lines = await BookService.getBookLines('${translation.id}.txt');
+    if (lines.length == 1 && lines.first == 'Book not found.') {
+      return;
+    }
+
+    final verses = <OldBibleVerse>[];
+    for (var i = 0; i < lines.length; i++) {
+      verses.add(
+        OldBibleVerse(
+          book: translation.displayTitle ?? translation.name,
+          chapter: 1,
+          verse: i + 1,
+          text: lines[i],
+        ),
+      );
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _assetVersesByTranslationId[translation.id] = verses;
+      if (_selectedTranslation.id == translation.id) {
+        _selectedBook = _booksFor(_selectedTranslation).firstOrNull;
+        _selectedChapter = _chaptersFor(_selectedTranslation, _selectedBook).firstOrNull;
+      }
+    });
   }
 
   String _label(AppText key) =>
@@ -149,13 +239,107 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _applyVoiceFilter();
   }
 
+  void _openLanguagePicker() {
+    String query = '';
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final filtered = query.isEmpty
+              ? AppLanguageCatalog.languages
+              : AppLanguageCatalog.languages
+                  .where((l) =>
+                      l.label.toLowerCase().contains(query.toLowerCase()))
+                  .toList();
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.75,
+            maxChildSize: 0.95,
+            minChildSize: 0.4,
+            builder: (_, controller) => Column(
+              children: [
+                const SizedBox(height: 8),
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[400],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TextField(
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: 'Search language…',
+                      prefixIcon: Icon(Icons.search),
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (v) => setLocal(() => query = v),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Divider(height: 1),
+                Expanded(
+                  child: ListView.builder(
+                    controller: controller,
+                    itemCount: filtered.length,
+                    itemBuilder: (_, i) {
+                      final lang = filtered[i];
+                      final selected =
+                          lang.languageCode == _selectedLanguage.languageCode;
+                      return ListTile(
+                        title: Text(lang.label),
+                        trailing: selected
+                            ? Icon(Icons.check_circle,
+                                color: Theme.of(ctx).colorScheme.primary,
+                                size: 20)
+                            : null,
+                        selected: selected,
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          setState(() => _selectedLanguage = lang);
+                          _applyVoiceFilter();
+                          _loadLabels();
+                        },
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _toggleSpeaker() async {
+    if (_speaking) {
+      await _voiceReader.stop();
+    } else {
+      await _readChapter();
+    }
+  }
+
+
   Future<void> _readChapter() async {
     final verses = _versesForSelection();
     if (verses.isEmpty) {
       return;
     }
 
-    final text = verses.map((v) => 'Verse ${v.verse}. ${v.text}').join(' ');
+    final intro = '${_selectedBook ?? ''}, Chapter ${_selectedChapter ?? ''}. ';
+    final body = verses.map((v) => v.text).join(' ');
+    final text = intro + body;
     await _voiceReader.speak(
       text: text,
       rate: _speechRate,
@@ -166,6 +350,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final selectableTranslations = _selectableTranslations();
+    final translationValue = selectableTranslations.any((t) => t.id == _selectedTranslation.id)
+        ? _selectedTranslation
+        : (selectableTranslations.isNotEmpty ? selectableTranslations.first : _selectedTranslation);
     final books = _booksFor(_selectedTranslation);
     final chapters = _chaptersFor(_selectedTranslation, _selectedBook);
     final verses = _versesForSelection();
@@ -174,37 +362,59 @@ class _ReaderScreenState extends State<ReaderScreen> {
       padding: const EdgeInsets.all(16),
       child: SingleChildScrollView(
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-          DropdownButtonFormField<AppLanguage>(
-            initialValue: _selectedLanguage,
-            decoration: InputDecoration(
-              labelText: _label(AppText.language),
-              border: const OutlineInputBorder(),
+          // Language picker
+          Material(
+            color: Theme.of(context).colorScheme.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(4),
+              side: BorderSide(color: Theme.of(context).dividerColor),
             ),
-            items: AppLanguageCatalog.languages
-                .map(
-                  (language) => DropdownMenuItem<AppLanguage>(
-                    value: language,
-                    child: Text(language.label),
-                  ),
-                )
-                .toList(),
-            onChanged: (language) {
-              if (language == null) {
-                return;
-              }
-              setState(() {
-                _selectedLanguage = language;
-              });
-              _applyVoiceFilter();
-              _loadLabels();
-            },
+            child: InkWell(
+              onTap: _openLanguagePicker,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _label(AppText.language),
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelMedium
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _selectedLanguage.label,
+                            maxLines: 2,
+                            softWrap: true,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodyLarge,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(Icons.arrow_drop_down),
+                  ],
+                ),
+              ),
+            ),
           ),
           const SizedBox(height: 12),
           TranslationDropdown(
             label: _label(AppText.translation),
-            value: _selectedTranslation,
-            options: OldBiblesData.translations,
+            value: translationValue,
+            options: selectableTranslations,
             onChanged: (translation) {
               setState(() {
                 _selectedTranslation = translation;
@@ -212,14 +422,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 _selectedChapter =
                     _chaptersFor(translation, _selectedBook).firstOrNull;
               });
+              _loadAssetTextForTranslation(translation);
             },
           ),
+          if (_effectiveVersesFor(_selectedTranslation).isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Full text not installed yet: assets/texts/${_selectedTranslation.id}.txt',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
           const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
                 flex: 3,
                 child: DropdownButtonFormField<String>(
+                  isExpanded: true,
                   initialValue: _selectedBook,
                   decoration: InputDecoration(
                     labelText: _label(AppText.book),
@@ -247,6 +467,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               const SizedBox(width: 12),
               Expanded(
                 child: DropdownButtonFormField<int>(
+                  isExpanded: true,
                   initialValue: _selectedChapter,
                   decoration: InputDecoration(
                     labelText: _label(AppText.chapter),
@@ -271,6 +492,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<VoiceOption>(
+            isExpanded: true,
             initialValue: _selectedVoice,
             decoration: InputDecoration(
               labelText:
@@ -310,22 +532,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
               ),
             ),
           const SizedBox(height: 12),
+          // Speaker toggle
           Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: _readChapter,
-                  icon: const Icon(Icons.volume_up),
-                  label: Text(_label(AppText.readChapter)),
+              FilledButton.icon(
+                onPressed: _toggleSpeaker,
+                icon: Icon(_speaking ? Icons.stop_circle : Icons.volume_up),
+                label: Text(
+                  _speaking ? _label(AppText.stop) : _label(AppText.readChapter),
                 ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _speaking ? _voiceReader.stop : null,
-                  icon: const Icon(Icons.stop_circle_outlined),
-                  label: Text(_label(AppText.stop)),
-                ),
+                style: _speaking
+                    ? FilledButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.error,
+                      )
+                    : null,
               ),
             ],
           ),
