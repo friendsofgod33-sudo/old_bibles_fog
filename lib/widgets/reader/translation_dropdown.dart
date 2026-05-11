@@ -28,7 +28,10 @@ class TranslationDropdown extends StatelessWidget {
           .map(
             (translation) => DropdownMenuItem<OldBibleTranslation>(
               value: translation,
-              child: Text('${translation.name} (${translation.year})'),
+              child: Text(
+                translation.displayTitle ??
+                    '${translation.name} (${translation.year})',
+              ),
             ),
           )
           .toList(),
